@@ -1,42 +1,30 @@
-/**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
- */
 {
-	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "pr-reviewer",
-	"main": "src/index.ts",
-	"compatibility_date": "2026-11-23",
-	"observability": {
-		"enabled": true
-	},
-	"upload_source_maps": true
-	/**
-	 * Smart Placement
-	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
-	 */
-	// "placement": {  "mode": "smart" }
-	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
-	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
-	 */
-	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
-	 */
-	// "vars": {  "MY_VARIABLE": "production_value" }
-	/**
-	 * Static Assets
-	 * https://developers.cloudflare.com/workers/static-assets/binding/
-	 */
-	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
-	/**
-	 * Service Bindings (communicate between multiple Workers)
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
-	 */
-	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pr-reviewer",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "observability": { "enabled": true },
+
+  // Workers AI (only used when MODEL_PROVIDER is "workers-ai")
+  "ai": { "binding": "AI" },
+
+  // One Durable Object instance per pull request
+  "durable_objects": {
+    "bindings": [{ "name": "PR_REVIEWER", "class_name": "PRReviewer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PRReviewer"] }],
+
+  // Non-secret settings. Secrets go in with: npx wrangler secret put <NAME>
+  //   GITHUB_APP_ID, GITHUB_PRIVATE_KEY, WEBHOOK_SECRET, ANTHROPIC_API_KEY (if using Claude)
+  "vars": {
+    "MODEL_PROVIDER": "workers-ai",                       // "anthropic" or "workers-ai"
+    "ANTHROPIC_MODEL": "claude-sonnet-5-5",
+    "WORKERS_AI_MODEL": "@cf/google/gemma-4-26b-a4b-it",
+    "CHECK_NAME": "AI review",                            // the name to mark as a required status check
+    "DEBOUNCE_SECONDS": "20",                             // wait for pushes to settle before reviewing
+    "MAX_DIFF_CHARS": "40000",                           // lower to ~40000 for Workers AI models
+    "MAX_INLINE_COMMENTS": "20",
+    "BLOCK_ON_BLOCKERS": "true",                          // fail the check when a blocker is found
+    "SKIP_LABEL": "skip-ai-review"
+  }
 }
