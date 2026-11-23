@@ -65,29 +65,41 @@ export default {
     const event = request.headers.get("x-github-event") ?? "";
     if (event === "ping") return new Response("pong");
 
-    const job = jobFromEvent(event, JSON.parse(body), env);
-    if (!job) return new Response("ignored");
+    const action = actionFromEvent(event, JSON.parse(body), env);
+    if (!action) return new Response("ignored");
 
     // One Durable Object per PR: pushes to the same PR are serialised and debounced there.
+    const { job } = action;
     const stub = env.PR_REVIEWER.get(env.PR_REVIEWER.idFromName(`${job.owner}/${job.repo}#${job.pr}`));
+    if (action.kind === "skip") {
+      await stub.skip(job);
+      return new Response("skipped");
+    }
     await stub.enqueue(job);
     return new Response("queued", { status: 202 });
   },
 } satisfies ExportedHandler<Env>;
 
-function jobFromEvent(event: string, p: any, env: Env): Job | null {
+type Action = { kind: "review" | "skip"; job: Job };
+
+function actionFromEvent(event: string, p: any, env: Env): Action | null {
   if (event === "pull_request") {
-    if (!["opened", "reopened", "synchronize", "ready_for_review"].includes(p.action)) return null;
     const pr = p.pull_request;
     if (pr.draft || pr.state !== "open") return null;
-    if (env.SKIP_LABEL && pr.labels?.some((l: any) => l.name === env.SKIP_LABEL)) return null;
-    return { owner: p.repository.owner.login, repo: p.repository.name, pr: pr.number, sha: pr.head.sha, installationId: p.installation.id };
+    const job: Job = { owner: p.repository.owner.login, repo: p.repository.name, pr: pr.number, sha: pr.head.sha, installationId: p.installation.id };
+    const isSkipLabel = (name?: string) => !!env.SKIP_LABEL && name === env.SKIP_LABEL;
+    const hasSkipLabel = pr.labels?.some((l: any) => isSkipLabel(l.name));
+
+    if (p.action === "labeled") return isSkipLabel(p.label?.name) ? { kind: "skip", job } : null;
+    if (p.action === "unlabeled") return isSkipLabel(p.label?.name) ? { kind: "review", job } : null;
+    if (!["opened", "reopened", "synchronize", "ready_for_review"].includes(p.action)) return null;
+    return { kind: hasSkipLabel ? "skip" : "review", job };
   }
   // "Re-run" clicked on our check in the PR's Checks tab
   if (event === "check_run" && p.action === "rerequested" && String(p.check_run.app?.id) === String(env.GITHUB_APP_ID)) {
     const pr = p.check_run.pull_requests?.[0];
     if (!pr) return null;
-    return { owner: p.repository.owner.login, repo: p.repository.name, pr: pr.number, sha: p.check_run.head_sha, installationId: p.installation.id };
+    return { kind: "review", job: { owner: p.repository.owner.login, repo: p.repository.name, pr: pr.number, sha: p.check_run.head_sha, installationId: p.installation.id } };
   }
   return null;
 }
@@ -105,6 +117,18 @@ export class PRReviewer extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + num(this.env.DEBOUNCE_SECONDS, 20) * 1000);
   }
 
+  /**
+   * PR has the skip label: cancel any queued review and report a passing check, so a required
+   * "AI review" check doesn't block the merge.
+   */
+  async skip(job: Job): Promise<void> {
+    await this.ctx.storage.delete("pending");
+    await this.ctx.storage.put("latestSha", `skipped:${job.sha}`); // makes any in-flight review discard its result
+    await this.startCheck(job);
+    await this.finishCheck(job, "success", "Skipped",
+      `AI review was skipped because the PR has the \`${this.env.SKIP_LABEL}\` label. Remove the label to run a review.`);
+  }
+
   async alarm(info?: AlarmInvocationInfo): Promise<void> {
     const job = await this.ctx.storage.get<Job>("pending");
     if (!job) return;
@@ -113,6 +137,7 @@ export class PRReviewer extends DurableObject<Env> {
       await this.clearPending(job);
     } catch (err) {
       console.error(`Review of ${job.owner}/${job.repo}#${job.pr} @ ${job.sha} failed`, err);
+      if ((await this.ctx.storage.get<string>("latestSha")) === `skipped:${job.sha}`) return;
       if ((info?.retryCount ?? 0) < 2) throw err; // Cloudflare retries alarms with backoff
       await this.clearPending(job);
       await this.finishCheck(job, "failure", "AI review could not run", `\`\`\`\n${String(err).slice(0, 3000)}\n\`\`\`\nClick **Re-run** to try again.`)
@@ -147,8 +172,10 @@ export class PRReviewer extends DurableObject<Env> {
       userPrompt({ title: pr.title, body: pr.body, base: pr.base.ref, head: pr.head.label }, diff.text, diff.skipped),
     );
 
-    // A newer push may have arrived while the model was thinking. Don't post stale feedback.
-    if ((await this.ctx.storage.get<string>("latestSha")) !== job.sha) {
+    // A newer push (or the skip label) may have arrived while the model was thinking. Don't post stale feedback.
+    const latest = await this.ctx.storage.get<string>("latestSha");
+    if (latest === `skipped:${job.sha}`) return; // skip() already completed this commit's check
+    if (latest !== job.sha) {
       return this.finishCheck(job, "neutral", "Superseded", "A newer commit was pushed during the review.");
     }
 
