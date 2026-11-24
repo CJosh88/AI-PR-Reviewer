@@ -19,10 +19,10 @@
   "vars": {
     "MODEL_PROVIDER": "workers-ai",                       // "anthropic" or "workers-ai"
     "ANTHROPIC_MODEL": "claude-sonnet-5-5",
-    "WORKERS_AI_MODEL": "@cf/google/gemma-4-26b-a4b-it",
+    "WORKERS_AI_MODEL": "@cf/qwen/qwen3.8-27b",
     "CHECK_NAME": "AI review",                            // the name to mark as a required status check
     "DEBOUNCE_SECONDS": "20",                             // wait for pushes to settle before reviewing
-    "MAX_DIFF_CHARS": "40000",                           // lower to ~40000 for Workers AI models
+    "MAX_DIFF_CHARS": "80000",                           // lower to ? for Workers AI models
     "MAX_INLINE_COMMENTS": "20",
     "BLOCK_ON_BLOCKERS": "true",                          // fail the check when a blocker is found
     "SKIP_LABEL": "skip-ai-review"
